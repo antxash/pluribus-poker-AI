@@ -1,8 +1,17 @@
 import glob
 import setuptools
+import re
 from typing import List
 
-import poker_ai
+
+def get_version():
+    """从poker_ai/__init__.py文件中读取版本号"""
+    with open("poker_ai/__init__.py", "r") as f:
+        content = f.read()
+        match = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', content)
+        if match:
+            return match.group(1)
+        return "1.0.0rc3"  # 默认版本号
 
 
 def get_scripts_from_bin() -> List[str]:
@@ -28,7 +37,7 @@ def get_requirements() -> List[str]:
 
 setuptools.setup(
     name="poker_ai",
-    version=poker_ai.__version__,
+    version=get_version(),
     author="Leon Fedden, Colin Manko",
     author_email="leonfedden@gmail.com",
     description="Open source implementation of a CFR based poker AI player.",

@@ -5,8 +5,6 @@ from typing import Callable, Optional, Union
 
 import joblib
 
-manager = mp.Manager()
-
 
 class Agent:
     """
@@ -38,7 +36,14 @@ class Agent:
         # Don't use manager if we are running tests.
         testing_suite = bool(os.environ.get("TESTING_SUITE", False))
         use_manager = use_manager and not testing_suite
-        dict_constructor: Callable = manager.dict if use_manager else dict
+        
+        # Create manager only when needed
+        if use_manager:
+            manager = mp.Manager()
+            dict_constructor: Callable = manager.dict
+        else:
+            dict_constructor = dict
+            
         self.strategy = dict_constructor()
         self.regret = dict_constructor()
         if agent_path is not None:
