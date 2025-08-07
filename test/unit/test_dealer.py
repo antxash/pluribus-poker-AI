@@ -3,7 +3,7 @@ from poker_ai.poker.card import Card
 
 
 def test_dealer_1():
-    include_ranks = [10, 11, 12, 13, 14]
+    include_ranks = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
     dealer = Dealer(include_ranks=include_ranks)
     deck_size = len(dealer.deck._cards_in_deck)
     assert deck_size == len(include_ranks * 4)
