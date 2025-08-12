@@ -42,11 +42,14 @@ class CardInfoLutBuilder(CardCombos):
         self.n_simulations_river = n_simulations_river
         self.n_simulations_turn = n_simulations_turn
         self.n_simulations_flop = n_simulations_flop
+        self.low_card_rank = low_card_rank
+        self.high_card_rank = high_card_rank
         super().__init__(
             low_card_rank, high_card_rank,
         )
-        self.card_info_lut_path: Path = Path(save_dir) / "card_info_lut.joblib"
-        self.centroid_path: Path = Path(save_dir) / "centroids.joblib"
+        self.save_dir = Path(save_dir)
+        self.card_info_lut_path: Path = self.save_dir / "card_info_lut.joblib"
+        self.centroid_path: Path = self.save_dir / "centroids.joblib"
         try:
             self.card_info_lut: Dict[str, Any] = joblib.load(self.card_info_lut_path)
             self.centroids: Dict[str, Any] = joblib.load(self.centroid_path)
@@ -69,89 +72,250 @@ class CardInfoLutBuilder(CardCombos):
                 builder=self
             )
             joblib.dump(self.card_info_lut, self.card_info_lut_path)
+        
+        # Pass all cluster counts to each method for robust checkpointing
         if "river" not in self.card_info_lut:
             self.card_info_lut["river"] = self._compute_river_clusters(
-                n_river_clusters,
+                n_river_clusters, n_turn_clusters, n_flop_clusters
             )
             joblib.dump(self.card_info_lut, self.card_info_lut_path)
             joblib.dump(self.centroids, self.centroid_path)
         if "turn" not in self.card_info_lut:
-            self.card_info_lut["turn"] = self._compute_turn_clusters(n_turn_clusters)
+            self.card_info_lut["turn"] = self._compute_turn_clusters(
+                n_river_clusters, n_turn_clusters, n_flop_clusters
+            )
             joblib.dump(self.card_info_lut, self.card_info_lut_path)
             joblib.dump(self.centroids, self.centroid_path)
         if "flop" not in self.card_info_lut:
-            self.card_info_lut["flop"] = self._compute_flop_clusters(n_flop_clusters)
+            self.card_info_lut["flop"] = self._compute_flop_clusters(
+                n_river_clusters, n_turn_clusters, n_flop_clusters
+            )
             joblib.dump(self.card_info_lut, self.card_info_lut_path)
             joblib.dump(self.centroids, self.centroid_path)
         end = time.time()
         log.info(f"Finished computation of clusters - took {end - start} seconds.")
 
-    def _compute_river_clusters(self, n_river_clusters: int):
+    def _get_full_params(self, n_river_clusters: int, n_turn_clusters: int, n_flop_clusters: int) -> Dict:
+        """Helper to create a dictionary of all parameters for checkpoint validation."""
+        return {
+            'low_card_rank': self.low_card_rank,
+            'high_card_rank': self.high_card_rank,
+            'n_simulations_river': self.n_simulations_river,
+            'n_simulations_turn': self.n_simulations_turn,
+            'n_simulations_flop': self.n_simulations_flop,
+            'n_river_clusters': n_river_clusters,
+            'n_turn_clusters': n_turn_clusters,
+            'n_flop_clusters': n_flop_clusters
+        }
+
+    def _compute_river_clusters(self, n_river_clusters: int, n_turn_clusters: int, n_flop_clusters: int):
         """Compute river clusters and create lookup table."""
         log.info("Starting computation of river clusters.")
-        start = time.time()
-        with concurrent.futures.ProcessPoolExecutor() as executor:
-            self._river_ehs = list(
-                tqdm(
-                    executor.map(
-                        self.process_river_ehs,
-                        self.river,
-                        chunksize=len(self.river) // 160,
-                    ),
-                    total=len(self.river),
+        start_time = time.time()
+        
+        checkpoint_path = self.save_dir / "river_ehs_checkpoint.joblib"
+        current_params = self._get_full_params(n_river_clusters, n_turn_clusters, n_flop_clusters)
+
+        start_batch = 0
+        all_river_ehs = []
+        try:
+            checkpoint_data = joblib.load(checkpoint_path)
+            if checkpoint_data.get('params') == current_params:
+                start_batch = checkpoint_data['completed_batches'] + 1
+                all_river_ehs = checkpoint_data['results']
+                log.info(f"Resumed from checkpoint. Last completed batch: {start_batch - 1}. Starting from batch {start_batch + 1}.")
+            else:
+                log.warning("Checkpoint parameters do not match current parameters. Discarding old checkpoint and starting from scratch.")
+        except FileNotFoundError:
+            log.info("No checkpoint found for river computation. Starting from scratch.")
+        except Exception as e:
+            log.warning(f"Could not load checkpoint file due to an error: {e}. Starting from scratch.")
+
+        total_combinations = len(self.river)
+        batch_size = 10000
+        total_batches = (total_combinations + batch_size - 1) // batch_size
+        log.info(f"Processing {total_combinations:,} river combinations in {total_batches:,} batches of {batch_size:,} each.")
+
+        for batch_idx in range(start_batch, total_batches):
+            start_idx = batch_idx * batch_size
+            end_idx = min((batch_idx + 1) * batch_size, total_combinations)
+            batch_combinations = self.river[start_idx:end_idx]
+            
+            log.info(f"Processing batch {batch_idx + 1}/{total_batches} (combinations {start_idx:,} to {end_idx:,})")
+            
+            with concurrent.futures.ProcessPoolExecutor() as executor:
+                batch_ehs = list(
+                    tqdm(
+                        executor.map(
+                            self.process_river_ehs,
+                            batch_combinations,
+                            chunksize=max(1, len(batch_combinations) // 160),
+                        ),
+                        total=len(batch_combinations),
+                        desc=f"Batch {batch_idx + 1}/{total_batches}",
+                        unit="combinations"
+                    )
                 )
-            )
+            
+            all_river_ehs.extend(batch_ehs)
+            
+            checkpoint_data = {'params': current_params, 'completed_batches': batch_idx, 'results': all_river_ehs}
+            joblib.dump(checkpoint_data, checkpoint_path)
+            log.info(f"Completed batch {batch_idx + 1}/{total_batches}. Checkpoint saved. Total combinations processed: {len(all_river_ehs):,}")
+
+        log.info("All river batches completed. Starting final clustering.")
+        self._river_ehs = all_river_ehs
+        
         self.centroids["river"], self._river_clusters = self.cluster(
             num_clusters=n_river_clusters, X=self._river_ehs
         )
-        end = time.time()
-        log.info(
-            f"Finished computation of river clusters - took {end - start} seconds."
-        )
+        
+        if checkpoint_path.exists():
+            checkpoint_path.unlink()
+            log.info(f"Removed river checkpoint file: {checkpoint_path}")
+
+        end_time = time.time()
+        log.info(f"Finished computation of river clusters - took {end_time - start_time:.2f} seconds.")
         return self.create_card_lookup(self._river_clusters, self.river)
 
-    def _compute_turn_clusters(self, n_turn_clusters: int):
+    def _compute_turn_clusters(self, n_river_clusters: int, n_turn_clusters: int, n_flop_clusters: int):
         """Compute turn clusters and create lookup table."""
         log.info("Starting computation of turn clusters.")
-        start = time.time()
-        with concurrent.futures.ProcessPoolExecutor() as executor:
-            self._turn_ehs_distributions = list(
-                tqdm(
-                    executor.map(
-                        self.process_turn_ehs_distributions,
-                        self.turn,
-                        chunksize=len(self.turn) // 160,
-                    ),
-                    total=len(self.turn),
+        start_time = time.time()
+
+        checkpoint_path = self.save_dir / "turn_ehs_checkpoint.joblib"
+        current_params = self._get_full_params(n_river_clusters, n_turn_clusters, n_flop_clusters)
+
+        start_batch = 0
+        all_turn_ehs_distributions = []
+        try:
+            checkpoint_data = joblib.load(checkpoint_path)
+            if checkpoint_data.get('params') == current_params:
+                start_batch = checkpoint_data['completed_batches'] + 1
+                all_turn_ehs_distributions = checkpoint_data['results']
+                log.info(f"Resumed from checkpoint. Last completed batch: {start_batch - 1}. Starting from batch {start_batch + 1}.")
+            else:
+                log.warning("Checkpoint parameters do not match current parameters. Discarding old checkpoint and starting from scratch.")
+        except FileNotFoundError:
+            log.info("No checkpoint found for turn computation. Starting from scratch.")
+        except Exception as e:
+            log.warning(f"Could not load checkpoint file due to an error: {e}. Starting from scratch.")
+
+        total_combinations = len(self.turn)
+        batch_size = 10000
+        total_batches = (total_combinations + batch_size - 1) // batch_size
+        log.info(f"Processing {total_combinations:,} turn combinations in {total_batches:,} batches of {batch_size:,} each.")
+
+        for batch_idx in range(start_batch, total_batches):
+            start_idx = batch_idx * batch_size
+            end_idx = min((batch_idx + 1) * batch_size, total_combinations)
+            batch_combinations = self.turn[start_idx:end_idx]
+            
+            log.info(f"Processing batch {batch_idx + 1}/{total_batches} (combinations {start_idx:,} to {end_idx:,})")
+            
+            with concurrent.futures.ProcessPoolExecutor() as executor:
+                batch_ehs_distributions = list(
+                    tqdm(
+                        executor.map(
+                            self.process_turn_ehs_distributions,
+                            batch_combinations,
+                            chunksize=max(1, len(batch_combinations) // 160),
+                        ),
+                        total=len(batch_combinations),
+                        desc=f"Batch {batch_idx + 1}/{total_batches}",
+                        unit="combinations"
+                    )
                 )
-            )
+            
+            all_turn_ehs_distributions.extend(batch_ehs_distributions)
+            
+            checkpoint_data = {'params': current_params, 'completed_batches': batch_idx, 'results': all_turn_ehs_distributions}
+            joblib.dump(checkpoint_data, checkpoint_path)
+            log.info(f"Completed batch {batch_idx + 1}/{total_batches}. Checkpoint saved. Total combinations processed: {len(all_turn_ehs_distributions):,}")
+
+        log.info("All turn batches completed. Starting final clustering.")
+        self._turn_ehs_distributions = all_turn_ehs_distributions
+        
         self.centroids["turn"], self._turn_clusters = self.cluster(
             num_clusters=n_turn_clusters, X=self._turn_ehs_distributions
         )
-        end = time.time()
-        log.info(f"Finished computation of turn clusters - took {end - start} seconds.")
+        
+        if checkpoint_path.exists():
+            checkpoint_path.unlink()
+            log.info(f"Removed turn checkpoint file: {checkpoint_path}")
+
+        end_time = time.time()
+        log.info(f"Finished computation of turn clusters - took {end_time - start_time:.2f} seconds.")
         return self.create_card_lookup(self._turn_clusters, self.turn)
 
-    def _compute_flop_clusters(self, n_flop_clusters: int):
+    def _compute_flop_clusters(self, n_river_clusters: int, n_turn_clusters: int, n_flop_clusters: int):
         """Compute flop clusters and create lookup table."""
         log.info("Starting computation of flop clusters.")
-        start = time.time()
-        with concurrent.futures.ProcessPoolExecutor() as executor:
-            self._flop_potential_aware_distributions = list(
-                tqdm(
-                    executor.map(
-                        self.process_flop_potential_aware_distributions,
-                        self.flop,
-                        chunksize=len(self.flop) // 160,
-                    ),
-                    total=len(self.flop),
+        start_time = time.time()
+
+        checkpoint_path = self.save_dir / "flop_ehs_checkpoint.joblib"
+        current_params = self._get_full_params(n_river_clusters, n_turn_clusters, n_flop_clusters)
+
+        start_batch = 0
+        all_flop_potential_aware_distributions = []
+        try:
+            checkpoint_data = joblib.load(checkpoint_path)
+            if checkpoint_data.get('params') == current_params:
+                start_batch = checkpoint_data['completed_batches'] + 1
+                all_flop_potential_aware_distributions = checkpoint_data['results']
+                log.info(f"Resumed from checkpoint. Last completed batch: {start_batch - 1}. Starting from batch {start_batch + 1}.")
+            else:
+                log.warning("Checkpoint parameters do not match current parameters. Discarding old checkpoint and starting from scratch.")
+        except FileNotFoundError:
+            log.info("No checkpoint found for flop computation. Starting from scratch.")
+        except Exception as e:
+            log.warning(f"Could not load checkpoint file due to an error: {e}. Starting from scratch.")
+
+        total_combinations = len(self.flop)
+        batch_size = 10000
+        total_batches = (total_combinations + batch_size - 1) // batch_size
+        log.info(f"Processing {total_combinations:,} flop combinations in {total_batches:,} batches of {batch_size:,} each.")
+
+        for batch_idx in range(start_batch, total_batches):
+            start_idx = batch_idx * batch_size
+            end_idx = min((batch_idx + 1) * batch_size, total_combinations)
+            batch_combinations = self.flop[start_idx:end_idx]
+            
+            log.info(f"Processing batch {batch_idx + 1}/{total_batches} (combinations {start_idx:,} to {end_idx:,})")
+            
+            with concurrent.futures.ProcessPoolExecutor() as executor:
+                batch_potential_aware_distributions = list(
+                    tqdm(
+                        executor.map(
+                            self.process_flop_potential_aware_distributions,
+                            batch_combinations,
+                            chunksize=max(1, len(batch_combinations) // 160),
+                        ),
+                        total=len(batch_combinations),
+                        desc=f"Batch {batch_idx + 1}/{total_batches}",
+                        unit="combinations"
+                    )
                 )
-            )
+            
+            all_flop_potential_aware_distributions.extend(batch_potential_aware_distributions)
+            
+            checkpoint_data = {'params': current_params, 'completed_batches': batch_idx, 'results': all_flop_potential_aware_distributions}
+            joblib.dump(checkpoint_data, checkpoint_path)
+            log.info(f"Completed batch {batch_idx + 1}/{total_batches}. Checkpoint saved. Total combinations processed: {len(all_flop_potential_aware_distributions):,}")
+
+        log.info("All flop batches completed. Starting final clustering.")
+        self._flop_potential_aware_distributions = all_flop_potential_aware_distributions
+        
         self.centroids["flop"], self._flop_clusters = self.cluster(
             num_clusters=n_flop_clusters, X=self._flop_potential_aware_distributions
         )
-        end = time.time()
-        log.info(f"Finished computation of flop clusters - took {end - start} seconds.")
+        
+        if checkpoint_path.exists():
+            checkpoint_path.unlink()
+            log.info(f"Removed flop checkpoint file: {checkpoint_path}")
+
+        end_time = time.time()
+        log.info(f"Finished computation of flop clusters - took {end_time - start_time:.2f} seconds.")
         return self.create_card_lookup(self._flop_clusters, self.flop)
 
     def simulate_get_ehs(self, game: GameUtility,) -> np.ndarray:
