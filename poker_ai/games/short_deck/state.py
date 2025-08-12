@@ -448,11 +448,10 @@ class ShortDeckPokerState:
         actions: List[Optional[str]] = []
         if self.current_player.is_active:
             actions += ["fold", "call"]
-            # 6人桌无限局，调整阈值
+            # The raise cap is set to a high value to approximate no-limit
+            # poker in terms of number of raises. In standard limit hold'em,
+            # this would be a small number like 3 or 4.
             if self._n_raises < 100:
-                # In limit hold'em we can only bet/raise if there have been
-                # less than three raises in this round of betting, or if there
-                # are two players playing.
                 actions += ["raise"]
         else:
             actions += [None]

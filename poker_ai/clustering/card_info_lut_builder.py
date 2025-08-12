@@ -73,7 +73,6 @@ class CardInfoLutBuilder(CardCombos):
             )
             joblib.dump(self.card_info_lut, self.card_info_lut_path)
         
-        # Pass all cluster counts to each method for robust checkpointing
         if "river" not in self.card_info_lut:
             self.card_info_lut["river"] = self._compute_river_clusters(
                 n_river_clusters, n_turn_clusters, n_flop_clusters
@@ -136,14 +135,14 @@ class CardInfoLutBuilder(CardCombos):
         total_batches = (total_combinations + batch_size - 1) // batch_size
         log.info(f"Processing {total_combinations:,} river combinations in {total_batches:,} batches of {batch_size:,} each.")
 
-        for batch_idx in range(start_batch, total_batches):
-            start_idx = batch_idx * batch_size
-            end_idx = min((batch_idx + 1) * batch_size, total_combinations)
-            batch_combinations = self.river[start_idx:end_idx]
-            
-            log.info(f"Processing batch {batch_idx + 1}/{total_batches} (combinations {start_idx:,} to {end_idx:,})")
-            
-            with concurrent.futures.ProcessPoolExecutor() as executor:
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            for batch_idx in range(start_batch, total_batches):
+                start_idx = batch_idx * batch_size
+                end_idx = min((batch_idx + 1) * batch_size, total_combinations)
+                batch_combinations = self.river[start_idx:end_idx]
+                
+                log.info(f"Processing batch {batch_idx + 1}/{total_batches} (combinations {start_idx:,} to {end_idx:,})")
+                
                 batch_ehs = list(
                     tqdm(
                         executor.map(
@@ -156,12 +155,12 @@ class CardInfoLutBuilder(CardCombos):
                         unit="combinations"
                     )
                 )
-            
-            all_river_ehs.extend(batch_ehs)
-            
-            checkpoint_data = {'params': current_params, 'completed_batches': batch_idx, 'results': all_river_ehs}
-            joblib.dump(checkpoint_data, checkpoint_path)
-            log.info(f"Completed batch {batch_idx + 1}/{total_batches}. Checkpoint saved. Total combinations processed: {len(all_river_ehs):,}")
+                
+                all_river_ehs.extend(batch_ehs)
+                
+                checkpoint_data = {'params': current_params, 'completed_batches': batch_idx, 'results': all_river_ehs}
+                joblib.dump(checkpoint_data, checkpoint_path)
+                log.info(f"Completed batch {batch_idx + 1}/{total_batches}. Checkpoint saved. Total combinations processed: {len(all_river_ehs):,}")
 
         log.info("All river batches completed. Starting final clustering.")
         self._river_ehs = all_river_ehs
@@ -206,14 +205,14 @@ class CardInfoLutBuilder(CardCombos):
         total_batches = (total_combinations + batch_size - 1) // batch_size
         log.info(f"Processing {total_combinations:,} turn combinations in {total_batches:,} batches of {batch_size:,} each.")
 
-        for batch_idx in range(start_batch, total_batches):
-            start_idx = batch_idx * batch_size
-            end_idx = min((batch_idx + 1) * batch_size, total_combinations)
-            batch_combinations = self.turn[start_idx:end_idx]
-            
-            log.info(f"Processing batch {batch_idx + 1}/{total_batches} (combinations {start_idx:,} to {end_idx:,})")
-            
-            with concurrent.futures.ProcessPoolExecutor() as executor:
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            for batch_idx in range(start_batch, total_batches):
+                start_idx = batch_idx * batch_size
+                end_idx = min((batch_idx + 1) * batch_size, total_combinations)
+                batch_combinations = self.turn[start_idx:end_idx]
+                
+                log.info(f"Processing batch {batch_idx + 1}/{total_batches} (combinations {start_idx:,} to {end_idx:,})")
+                
                 batch_ehs_distributions = list(
                     tqdm(
                         executor.map(
@@ -226,12 +225,12 @@ class CardInfoLutBuilder(CardCombos):
                         unit="combinations"
                     )
                 )
-            
-            all_turn_ehs_distributions.extend(batch_ehs_distributions)
-            
-            checkpoint_data = {'params': current_params, 'completed_batches': batch_idx, 'results': all_turn_ehs_distributions}
-            joblib.dump(checkpoint_data, checkpoint_path)
-            log.info(f"Completed batch {batch_idx + 1}/{total_batches}. Checkpoint saved. Total combinations processed: {len(all_turn_ehs_distributions):,}")
+                
+                all_turn_ehs_distributions.extend(batch_ehs_distributions)
+                
+                checkpoint_data = {'params': current_params, 'completed_batches': batch_idx, 'results': all_turn_ehs_distributions}
+                joblib.dump(checkpoint_data, checkpoint_path)
+                log.info(f"Completed batch {batch_idx + 1}/{total_batches}. Checkpoint saved. Total combinations processed: {len(all_turn_ehs_distributions):,}")
 
         log.info("All turn batches completed. Starting final clustering.")
         self._turn_ehs_distributions = all_turn_ehs_distributions
@@ -276,14 +275,14 @@ class CardInfoLutBuilder(CardCombos):
         total_batches = (total_combinations + batch_size - 1) // batch_size
         log.info(f"Processing {total_combinations:,} flop combinations in {total_batches:,} batches of {batch_size:,} each.")
 
-        for batch_idx in range(start_batch, total_batches):
-            start_idx = batch_idx * batch_size
-            end_idx = min((batch_idx + 1) * batch_size, total_combinations)
-            batch_combinations = self.flop[start_idx:end_idx]
-            
-            log.info(f"Processing batch {batch_idx + 1}/{total_batches} (combinations {start_idx:,} to {end_idx:,})")
-            
-            with concurrent.futures.ProcessPoolExecutor() as executor:
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            for batch_idx in range(start_batch, total_batches):
+                start_idx = batch_idx * batch_size
+                end_idx = min((batch_idx + 1) * batch_size, total_combinations)
+                batch_combinations = self.flop[start_idx:end_idx]
+                
+                log.info(f"Processing batch {batch_idx + 1}/{total_batches} (combinations {start_idx:,} to {end_idx:,})")
+                
                 batch_potential_aware_distributions = list(
                     tqdm(
                         executor.map(
@@ -296,12 +295,12 @@ class CardInfoLutBuilder(CardCombos):
                         unit="combinations"
                     )
                 )
-            
-            all_flop_potential_aware_distributions.extend(batch_potential_aware_distributions)
-            
-            checkpoint_data = {'params': current_params, 'completed_batches': batch_idx, 'results': all_flop_potential_aware_distributions}
-            joblib.dump(checkpoint_data, checkpoint_path)
-            log.info(f"Completed batch {batch_idx + 1}/{total_batches}. Checkpoint saved. Total combinations processed: {len(all_flop_potential_aware_distributions):,}")
+                
+                all_flop_potential_aware_distributions.extend(batch_potential_aware_distributions)
+                
+                checkpoint_data = {'params': current_params, 'completed_batches': batch_idx, 'results': all_flop_potential_aware_distributions}
+                joblib.dump(checkpoint_data, checkpoint_path)
+                log.info(f"Completed batch {batch_idx + 1}/{total_batches}. Checkpoint saved. Total combinations processed: {len(all_flop_potential_aware_distributions):,}")
 
         log.info("All flop batches completed. Starting final clustering.")
         self._flop_potential_aware_distributions = all_flop_potential_aware_distributions

@@ -33,9 +33,20 @@ Options:
   --help                         Show this message and exit.
 """
 import click
+import multiprocessing
+import platform
 
 from poker_ai.clustering.card_info_lut_builder import CardInfoLutBuilder
 
+# On macOS, the default 'spawn' start method can cause issues when running from
+# an installed console script. 'fork' is faster and avoids the need for the
+# __name__ == '__main__' guard, which is suitable for this pure computation app.
+if platform.system() == "Darwin":
+    try:
+        multiprocessing.set_start_method('fork', force=True)
+    except RuntimeError:
+        # The start method can only be set once. If it's already set, that's fine.
+        pass
 
 @click.command()
 @click.option(
