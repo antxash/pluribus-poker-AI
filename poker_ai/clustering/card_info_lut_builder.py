@@ -3,7 +3,6 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List
 import concurrent.futures
-import threading
 
 import joblib
 import numpy as np
@@ -16,56 +15,6 @@ from poker_ai.clustering.game_utility import GameUtility
 from poker_ai.clustering.preflop import compute_preflop_lossless_abstraction
 
 log = logging.getLogger("poker_ai.clustering.runner")
-
-
-class ProgressMonitor:
-    """进度监控器，定期报告处理进度"""
-    def __init__(self, total_items: int, chunksize: int, description: str, report_interval: int = 300):
-        self.total_items = total_items
-        self.chunksize = chunksize
-        self.description = description
-        self.report_interval = report_interval  # 报告间隔（秒）
-        self.start_time = time.time()
-        self.stop_monitoring = False
-        self.monitor_thread = None
-        
-    def start_monitoring(self, future_list):
-        """开始监控进度"""
-        self.stop_monitoring = False
-        self.monitor_thread = threading.Thread(
-            target=self._monitor_progress, 
-            args=(future_list,)
-        )
-        self.monitor_thread.daemon = True
-        self.monitor_thread.start()
-        
-    def stop_monitoring_func(self):
-        """停止监控"""
-        self.stop_monitoring = True
-        if self.monitor_thread:
-            self.monitor_thread.join()
-    
-    def _monitor_progress(self, future_list):
-        """监控线程函数"""
-        while not self.stop_monitoring:
-            completed_futures = sum(1 for f in future_list if f.done())
-            # 正确计算已完成的combinations数量
-            completed_combinations = completed_futures * self.chunksize
-            # 确保不超过总数
-            completed_combinations = min(completed_combinations, self.total_items)
-            
-            if completed_combinations > 0:
-                elapsed = time.time() - self.start_time
-                rate = completed_combinations / elapsed if elapsed > 0 else 0
-                remaining = (self.total_items - completed_combinations) / rate if rate > 0 else float('inf')
-                
-                log.info(f"{self.description} Progress: {completed_combinations:,}/{self.total_items:,} "
-                        f"({completed_combinations/self.total_items*100:.1f}%) - "
-                        f"Rate: {rate:.1f} items/sec - "
-                        f"ETA: {remaining/3600:.1f} hours - "
-                        f"Chunks: {completed_futures}/{len(future_list)}")
-            
-            time.sleep(self.report_interval)
 
 
 class CardInfoLutBuilder(CardCombos):
@@ -140,40 +89,18 @@ class CardInfoLutBuilder(CardCombos):
     def _compute_river_clusters(self, n_river_clusters: int):
         """Compute river clusters and create lookup table."""
         log.info("Starting computation of river clusters.")
-        log.info(f"Processing {len(self.river):,} river combinations.")
         start = time.time()
-        
         with concurrent.futures.ProcessPoolExecutor() as executor:
-            # 提交所有任务并获取future列表
-            chunksize = max(1, len(self.river) // 160)
-            log.info(f"Using chunksize: {chunksize:,}")
-            
-            # 创建进度监控器
-            monitor = ProgressMonitor(len(self.river), chunksize, "River combinations")
-            
-            # 由于executor.map返回的是iterator，我们需要转换为future列表来监控
-            # 这里我们采用submit方式来获取可监控的futures
-            futures = []
-            for i in range(0, len(self.river), chunksize):
-                chunk = self.river[i:i+chunksize]
-                future = executor.submit(self._process_chunk, self.process_river_ehs, chunk)
-                futures.append(future)
-            
-            # 开始监控进度
-            monitor.start_monitoring(futures)
-            
-            # 收集结果
-            self._river_ehs = []
-            for future in tqdm(concurrent.futures.as_completed(futures), 
-                              total=len(futures), 
-                              desc="Processing river chunks"):
-                chunk_results = future.result()
-                self._river_ehs.extend(chunk_results)
-            
-            # 停止监控
-            monitor.stop_monitoring_func()
-            
-        log.info("Starting final clustering for river.")
+            self._river_ehs = list(
+                tqdm(
+                    executor.map(
+                        self.process_river_ehs,
+                        self.river,
+                        chunksize=len(self.river) // 160,
+                    ),
+                    total=len(self.river),
+                )
+            )
         self.centroids["river"], self._river_clusters = self.cluster(
             num_clusters=n_river_clusters, X=self._river_ehs
         )
@@ -186,38 +113,18 @@ class CardInfoLutBuilder(CardCombos):
     def _compute_turn_clusters(self, n_turn_clusters: int):
         """Compute turn clusters and create lookup table."""
         log.info("Starting computation of turn clusters.")
-        log.info(f"Processing {len(self.turn):,} turn combinations.")
         start = time.time()
-        
         with concurrent.futures.ProcessPoolExecutor() as executor:
-            chunksize = max(1, len(self.turn) // 160)
-            log.info(f"Using chunksize: {chunksize:,}")
-            
-            # 创建进度监控器
-            monitor = ProgressMonitor(len(self.turn), chunksize, "Turn combinations")
-            
-            # 提交所有任务
-            futures = []
-            for i in range(0, len(self.turn), chunksize):
-                chunk = self.turn[i:i+chunksize]
-                future = executor.submit(self._process_chunk, self.process_turn_ehs_distributions, chunk)
-                futures.append(future)
-            
-            # 开始监控进度
-            monitor.start_monitoring(futures)
-            
-            # 收集结果
-            self._turn_ehs_distributions = []
-            for future in tqdm(concurrent.futures.as_completed(futures), 
-                              total=len(futures), 
-                              desc="Processing turn chunks"):
-                chunk_results = future.result()
-                self._turn_ehs_distributions.extend(chunk_results)
-            
-            # 停止监控
-            monitor.stop_monitoring_func()
-            
-        log.info("Starting final clustering for turn.")
+            self._turn_ehs_distributions = list(
+                tqdm(
+                    executor.map(
+                        self.process_turn_ehs_distributions,
+                        self.turn,
+                        chunksize=len(self.turn) // 160,
+                    ),
+                    total=len(self.turn),
+                )
+            )
         self.centroids["turn"], self._turn_clusters = self.cluster(
             num_clusters=n_turn_clusters, X=self._turn_ehs_distributions
         )
@@ -228,49 +135,24 @@ class CardInfoLutBuilder(CardCombos):
     def _compute_flop_clusters(self, n_flop_clusters: int):
         """Compute flop clusters and create lookup table."""
         log.info("Starting computation of flop clusters.")
-        log.info(f"Processing {len(self.flop):,} flop combinations.")
         start = time.time()
-        
         with concurrent.futures.ProcessPoolExecutor() as executor:
-            chunksize = max(1, len(self.flop) // 160)
-            log.info(f"Using chunksize: {chunksize:,}")
-            
-            # 创建进度监控器
-            monitor = ProgressMonitor(len(self.flop), chunksize, "Flop combinations")
-            
-            # 提交所有任务
-            futures = []
-            for i in range(0, len(self.flop), chunksize):
-                chunk = self.flop[i:i+chunksize]
-                future = executor.submit(self._process_chunk, self.process_flop_potential_aware_distributions, chunk)
-                futures.append(future)
-            
-            # 开始监控进度
-            monitor.start_monitoring(futures)
-            
-            # 收集结果
-            self._flop_potential_aware_distributions = []
-            for future in tqdm(concurrent.futures.as_completed(futures), 
-                              total=len(futures), 
-                              desc="Processing flop chunks"):
-                chunk_results = future.result()
-                self._flop_potential_aware_distributions.extend(chunk_results)
-            
-            # 停止监控
-            monitor.stop_monitoring_func()
-            
-        log.info("Starting final clustering for flop.")
+            self._flop_potential_aware_distributions = list(
+                tqdm(
+                    executor.map(
+                        self.process_flop_potential_aware_distributions,
+                        self.flop,
+                        chunksize=len(self.flop) // 160,
+                    ),
+                    total=len(self.flop),
+                )
+            )
         self.centroids["flop"], self._flop_clusters = self.cluster(
             num_clusters=n_flop_clusters, X=self._flop_potential_aware_distributions
         )
         end = time.time()
         log.info(f"Finished computation of flop clusters - took {end - start} seconds.")
         return self.create_card_lookup(self._flop_clusters, self.flop)
-
-    @staticmethod
-    def _process_chunk(func, chunk):
-        """处理单个数据块"""
-        return [func(item) for item in chunk]
 
     def simulate_get_ehs(self, game: GameUtility,) -> np.ndarray:
         """
